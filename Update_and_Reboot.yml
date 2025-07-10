@@ -1,94 +1,51 @@
 ---
-- name: Actualizar sistemas Linux y chequear si requieren reinicio
+- name: Verificar si los sistemas requieren reinicio
   hosts: all
   become: yes
-  vars:
-    reinicio_requerido: false
-
   tasks:
+    - name: Verificar reinicio requerido en Red Hat/CentOS 6/7/8/9
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_required_redhat
+      when: ansible_distribution == "RedHat" or ansible_distribution == "CentOS"
 
-    - name: Obtener distribución
-      ansible.builtin.setup:
-        filter: ansible_distribution*
-      register: osinfo
-      no_log: true
+    - name: Verificar reinicio requerido en SUSE 12/15
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_required_suse
+      when: ansible_distribution == "SUSE" or ansible_distribution == "SLES"
 
-    - name: Actualizar paquetes en Red Hat / CentOS 6/7/8/9
-      when: ansible_facts['os_family'] == "RedHat"
-      block:
-        - name: Ejecutar yum/dnf update
-          ansible.builtin.yum:
-            name: "*"
-            state: latest
-          register: yum_result
-          no_log: true
+    - name: Verificar reinicio requerido en Ubuntu
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_required_ubuntu
+      when: ansible_distribution == "Ubuntu"
 
-        - name: Verificar si requiere reinicio en RHEL
-          ansible.builtin.shell: "needs-restarting -r || true"
-          register: reinicio_rhel
-          changed_when: false
-          failed_when: false
-          no_log: true
+    - name: Verificar mediante needrestart en sistemas basados en Debian/Ubuntu
+      ansible.builtin.command: needrestart -b -r l
+      register: needrestart_check
+      ignore_errors: yes
+      changed_when: false
+      when: ansible_distribution == "Ubuntu" or ansible_distribution == "Debian"
 
-        - name: Evaluar si requiere reinicio (RHEL)
-          set_fact:
-            reinicio_requerido: true
-          when: '"Reboot is required" in reinicio_rhel.stdout'
+    - name: Verificar mediante needs-restarting en RHEL/CentOS
+      ansible.builtin.command: needs-restarting -r
+      register: needs_restarting_check
+      ignore_errors: yes
+      changed_when: false
+      when: ansible_distribution == "RedHat" or ansible_distribution == "CentOS"
 
-    - name: Actualizar paquetes en SUSE 12 / 15
-      when: ansible_facts['os_family'] == "Suse"
-      block:
-        - name: Ejecutar zypper update
-          ansible.builtin.zypper:
-            name: "*"
-            state: latest
-          register: zypper_result
-          no_log: true
-
-        - name: Verificar si existe /var/run/reboot-required (SUSE)
-          ansible.builtin.stat:
-            path: /var/run/reboot-required
-          register: reboot_suse
-          no_log: true
-
-        - name: Evaluar si requiere reinicio (SUSE)
-          set_fact:
-            reinicio_requerido: true
-          when: reboot_suse.stat.exists
-
-    - name: Actualizar paquetes en Ubuntu
-      when: ansible_facts['os_family'] == "Debian"
-      block:
-        - name: Ejecutar apt update
-          ansible.builtin.apt:
-            update_cache: yes
-          no_log: true
-
-        - name: Ejecutar apt upgrade
-          ansible.builtin.apt:
-            upgrade: dist
-          register: apt_result
-          no_log: true
-
-        - name: Verificar si existe /var/run/reboot-required (Ubuntu)
-          ansible.builtin.stat:
-            path: /var/run/reboot-required
-          register: reboot_ubuntu
-          no_log: true
-
-        - name: Evaluar si requiere reinicio (Ubuntu)
-          set_fact:
-            reinicio_requerido: true
-          when: reboot_ubuntu.stat.exists
-
-    - name: Mostrar si requiere reinicio (oculto)
-      debug:
-        msg: "⚠️ Requiere reinicio"
-      when: reinicio_requerido
-      no_log: true
-
-    - name: Mostrar si NO requiere reinicio (oculto)
-      debug:
-        msg: "✅ No requiere reinicio"
-      when: not reinicio_requerido
-      no_log: true
+    - name: Mostrar resultados
+      ansible.builtin.debug:
+        msg: |
+          Distribución: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          Requiere reinicio:
+          {% if ansible_distribution == "RedHat" or ansible_distribution == "CentOS" %}
+            {% if needs_restarting_check.rc == 1 %}SÍ{% else %}NO{% endif %} (needs-restarting)
+            {% if reboot_required_redhat.stat.exists %}SÍ (reboot-required file){% endif %}
+          {% elif ansible_distribution == "SUSE" or ansible_distribution == "SLES" %}
+            {% if reboot_required_suse.stat.exists %}SÍ{% else %}NO{% endif %} (reboot-required file)
+          {% elif ansible_distribution == "Ubuntu" %}
+            {% if reboot_required_ubuntu.stat.exists %}SÍ (reboot-required file){% else %}NO{% endif %}
+            {% if needrestart_check.rc == 0 %}SÍ (needrestart){% endif %}
+          {% endif %}
