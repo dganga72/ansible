@@ -1,61 +1,73 @@
 ---
-- name: Actualizar y reiniciar si es necesario
+- name: Actualizar Red Hat, SUSE y Ubuntu y verificar si requiere reinicio
   hosts: all
   become: true
+  gather_facts: true
+
   tasks:
 
-    - name: Detectar distribución
-      ansible.builtin.debug:
-        msg: "Distribución: {{ ansible_distribution }} {{ ansible_distribution_major_version }}"
+    - name: Registrar distribución
+      debug:
+        msg: "Distribución detectada: {{ ansible_distribution }} {{ ansible_distribution_major_version }}"
 
-    - name: Actualizar RedHat/CentOS (yum/dnf)
+    - name: Actualizar RedHat/CentOS 6/7/8/9
       when: ansible_os_family == "RedHat"
-      ansible.builtin.yum:
-        name: '*'
+      package:
+        name: "*"
         state: latest
-        update_cache: yes
 
-    - name: Actualizar Ubuntu/Debian (apt)
-      when: ansible_os_family == "Debian"
-      ansible.builtin.apt:
+    - name: Actualizar SUSE 12/15
+      when: ansible_distribution == "SLES" or ansible_distribution == "SUSE"
+      command: zypper -n update
+      register: zypper_out
+      changed_when: "'Nothing to do' not in zypper_out.stdout"
+
+    - name: Actualizar Ubuntu
+      when: ansible_distribution == "Ubuntu"
+      apt:
         upgrade: dist
         update_cache: yes
 
-    - name: Actualizar SUSE (zypper)
-      when: ansible_distribution == "SLES" or ansible_distribution == "openSUSE"
-      community.general.zypper:
-        name: '*'
-        state: latest
-        update_cache: yes
-
-    # Chequear si se requiere reinicio
-    - name: Verificar si requiere reinicio - Red Hat
+    - name: Verificar si RedHat requiere reinicio
       when: ansible_os_family == "RedHat"
       stat:
-        path: /var/run/reboot-required  # Aunque Red Hat no siempre usa este archivo
+        path: /var/run/reboot-required
       register: reboot_required_rh
 
-    - name: Verificar si requiere reinicio - Ubuntu/Debian
-      when: ansible_os_family == "Debian"
+    - name: Verificar si Ubuntu requiere reinicio
+      when: ansible_distribution == "Ubuntu"
       stat:
         path: /var/run/reboot-required
       register: reboot_required_ubuntu
 
-    - name: Verificar si requiere reinicio - SUSE
-      when: ansible_distribution == "SLES" or ansible_distribution == "openSUSE"
-      command: needs-restarting -r
-      register: suse_reboot_check
-      failed_when: false
-      changed_when: false
+    - name: Verificar si SUSE requiere reinicio
+      when: ansible_distribution in ["SLES", "SUSE"]
+      shell: 'zypper ps -s | grep "You may wish to restart"'
+      register: reboot_required_suse
+      ignore_errors: yes
 
-    - name: Reiniciar si es necesario - RedHat
+    - name: Reiniciar si es necesario (RedHat)
       when: reboot_required_rh.stat.exists
-      ansible.builtin.reboot:
+      reboot:
 
-    - name: Reiniciar si es necesario - Ubuntu/Debian
+    - name: Reiniciar si es necesario (Ubuntu)
       when: reboot_required_ubuntu.stat.exists
-      ansible.builtin.reboot:
+      reboot:
 
-    - name: Reiniciar si es necesario - SUSE
-      when: suse_reboot_check.rc == 1
-      ansible.builtin.reboot:
+    - name: Reiniciar si es necesario (SUSE)
+      when: reboot_required_suse.stdout is search("restart")
+      reboot:
+
+    - name: Registrar resultado de reinicio en log
+      copy:
+        dest: "/var/log/ansible_reboot_check.log"
+        content: |
+          Host: {{ inventory_hostname }}
+          Fecha: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+          Requiere reinicio: {{
+            (reboot_required_rh.stat.exists | default(false)) or
+            (reboot_required_ubuntu.stat.exists | default(false)) or
+            (reboot_required_suse.stdout is search("restart") | default(false))
+          }}
+          Reiniciado automáticamente: Sí
+      when: inventory_hostname is defined
