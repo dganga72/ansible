@@ -1,73 +1,95 @@
 ---
-- name: Actualizar Red Hat, SUSE y Ubuntu y verificar si requiere reinicio
+- name: Update Linux systems and check for reboot requirement
   hosts: all
-  become: true
-  gather_facts: true
+  become: yes
+  gather_facts: yes
 
   tasks:
+    - name: Determine package manager and update command
+      block:
+        - name: Set variables for RedHat/CentOS 6/7/8/9
+          set_fact:
+            pkg_manager: "yum"
+            update_cmd: "yum update -y"
+            needs_reboot_file: "/var/run/reboot-required"
+            reboot_pkg: "yum-utils"
+            check_reboot_cmd: "needs-restarting -r"
+          when: ansible_distribution == 'RedHat' or ansible_distribution == 'CentOS'
 
-    - name: Registrar distribución
-      debug:
-        msg: "Distribución detectada: {{ ansible_distribution }} {{ ansible_distribution_major_version }}"
+        - name: Set variables for SUSE 12/15
+          set_fact:
+            pkg_manager: "zypper"
+            update_cmd: "zypper --non-interactive update"
+            needs_reboot_file: "/var/run/reboot-required"
+            reboot_pkg: ""
+            check_reboot_cmd: "zypper ps -s"
+          when: ansible_distribution == 'SUSE'
 
-    - name: Actualizar RedHat/CentOS 6/7/8/9
-      when: ansible_os_family == "RedHat"
+        - name: Set variables for Ubuntu
+          set_fact:
+            pkg_manager: "apt"
+            update_cmd: "apt-get update && apt-get upgrade -y"
+            needs_reboot_file: "/var/run/reboot-required"
+            reboot_pkg: "needrestart"
+            check_reboot_cmd: "needrestart -b"
+          when: ansible_distribution == 'Ubuntu'
+
+      rescue:
+        - name: Fail if distribution is not supported
+          fail:
+            msg: "Distribución no soportada: {{ ansible_distribution }}"
+          when: pkg_manager is not defined
+
+    - name: Install reboot check tools if needed
       package:
-        name: "*"
-        state: latest
+        name: "{{ reboot_pkg }}"
+        state: present
+      when: reboot_pkg != ""
 
-    - name: Actualizar SUSE 12/15
-      when: ansible_distribution == "SLES" or ansible_distribution == "SUSE"
-      command: zypper -n update
-      register: zypper_out
-      changed_when: "'Nothing to do' not in zypper_out.stdout"
+    - name: Perform system update
+      shell: "{{ update_cmd }}"
+      args:
+        executable: /bin/bash
+      register: update_result
+      changed_when: update_result.rc == 0
 
-    - name: Actualizar Ubuntu
-      when: ansible_distribution == "Ubuntu"
-      apt:
-        upgrade: dist
-        update_cache: yes
-
-    - name: Verificar si RedHat requiere reinicio
-      when: ansible_os_family == "RedHat"
-      stat:
-        path: /var/run/reboot-required
-      register: reboot_required_rh
-
-    - name: Verificar si Ubuntu requiere reinicio
-      when: ansible_distribution == "Ubuntu"
-      stat:
-        path: /var/run/reboot-required
-      register: reboot_required_ubuntu
-
-    - name: Verificar si SUSE requiere reinicio
-      when: ansible_distribution in ["SLES", "SUSE"]
-      shell: 'zypper ps -s | grep "You may wish to restart"'
-      register: reboot_required_suse
+    - name: Check if reboot is required (RedHat/CentOS method)
+      shell: "{{ check_reboot_cmd }}"
+      register: reboot_check
       ignore_errors: yes
+      changed_when: false
+      when: 
+        - ansible_distribution == 'RedHat' or ansible_distribution == 'CentOS'
+        - reboot_pkg != ""
 
-    - name: Reiniciar si es necesario (RedHat)
-      when: reboot_required_rh.stat.exists
-      reboot:
+    - name: Check if reboot is required (SUSE method)
+      shell: "{{ check_reboot_cmd }}"
+      register: reboot_check
+      ignore_errors: yes
+      changed_when: false
+      when: ansible_distribution == 'SUSE'
 
-    - name: Reiniciar si es necesario (Ubuntu)
-      when: reboot_required_ubuntu.stat.exists
-      reboot:
+    - name: Check if reboot is required (Ubuntu method)
+      stat:
+        path: "{{ needs_reboot_file }}"
+      register: reboot_file
+      when: ansible_distribution == 'Ubuntu'
 
-    - name: Reiniciar si es necesario (SUSE)
-      when: reboot_required_suse.stdout is search("restart")
-      reboot:
+    - name: Set reboot required fact
+      set_fact:
+        reboot_required: true
+      when: 
+        - (ansible_distribution == 'RedHat' or ansible_distribution == 'CentOS') and 
+          (reboot_check.rc == 1 or 'Reboot is required' in reboot_check.stdout)
+        - or (ansible_distribution == 'SUSE' and reboot_check.stdout != '')
+        - or (ansible_distribution == 'Ubuntu' and reboot_file.stat.exists)
 
-    - name: Registrar resultado de reinicio en log
-      copy:
-        dest: "/var/log/ansible_reboot_check.log"
-        content: |
-          Host: {{ inventory_hostname }}
-          Fecha: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
-          Requiere reinicio: {{
-            (reboot_required_rh.stat.exists | default(false)) or
-            (reboot_required_ubuntu.stat.exists | default(false)) or
-            (reboot_required_suse.stdout is search("restart") | default(false))
-          }}
-          Reiniciado automáticamente: Sí
-      when: inventory_hostname is defined
+    - name: Show reboot requirement status
+      debug:
+        msg: "El sistema requiere reinicio después de las actualizaciones"
+      when: reboot_required | default(false)
+
+    - name: Show no reboot needed
+      debug:
+        msg: "El sistema NO requiere reinicio"
+      when: not (reboot_required | default(false))
