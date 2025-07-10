@@ -1,0 +1,61 @@
+---
+- name: Actualizar y reiniciar si es necesario
+  hosts: all
+  become: true
+  tasks:
+
+    - name: Detectar distribución
+      ansible.builtin.debug:
+        msg: "Distribución: {{ ansible_distribution }} {{ ansible_distribution_major_version }}"
+
+    - name: Actualizar RedHat/CentOS (yum/dnf)
+      when: ansible_os_family == "RedHat"
+      ansible.builtin.yum:
+        name: '*'
+        state: latest
+        update_cache: yes
+
+    - name: Actualizar Ubuntu/Debian (apt)
+      when: ansible_os_family == "Debian"
+      ansible.builtin.apt:
+        upgrade: dist
+        update_cache: yes
+
+    - name: Actualizar SUSE (zypper)
+      when: ansible_distribution == "SLES" or ansible_distribution == "openSUSE"
+      community.general.zypper:
+        name: '*'
+        state: latest
+        update_cache: yes
+
+    # Chequear si se requiere reinicio
+    - name: Verificar si requiere reinicio - Red Hat
+      when: ansible_os_family == "RedHat"
+      stat:
+        path: /var/run/reboot-required  # Aunque Red Hat no siempre usa este archivo
+      register: reboot_required_rh
+
+    - name: Verificar si requiere reinicio - Ubuntu/Debian
+      when: ansible_os_family == "Debian"
+      stat:
+        path: /var/run/reboot-required
+      register: reboot_required_ubuntu
+
+    - name: Verificar si requiere reinicio - SUSE
+      when: ansible_distribution == "SLES" or ansible_distribution == "openSUSE"
+      command: needs-restarting -r
+      register: suse_reboot_check
+      failed_when: false
+      changed_when: false
+
+    - name: Reiniciar si es necesario - RedHat
+      when: reboot_required_rh.stat.exists
+      ansible.builtin.reboot:
+
+    - name: Reiniciar si es necesario - Ubuntu/Debian
+      when: reboot_required_ubuntu.stat.exists
+      ansible.builtin.reboot:
+
+    - name: Reiniciar si es necesario - SUSE
+      when: suse_reboot_check.rc == 1
+      ansible.builtin.reboot:
