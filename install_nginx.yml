@@ -1,0 +1,56 @@
+---
+- name: Instalar y configurar Nginx en RHEL 8
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Añadir repositorio EPEL (requerido para Nginx)
+      dnf:
+        name: epel-release
+        state: present
+      when: ansible_distribution == "RedHat" or ansible_distribution == "CentOS"
+
+    - name: Instalar paquete Nginx
+      dnf:
+        name: nginx
+        state: present
+        update_cache: yes
+
+    - name: Crear directorio personalizado para contenido web
+      file:
+        path: /var/www/html/custom
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Copiar página de ejemplo (opcional)
+      copy:
+        content: "<html><body><h1>Nginx instalado con Ansible</h1></body></html>"
+        dest: /var/www/html/custom/index.html
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Habilitar e iniciar servicio Nginx
+      service:
+        name: nginx
+        enabled: yes
+        state: started
+
+    - name: Abrir puerto HTTP (80) en el firewall
+      firewalld:
+        service: http
+        state: enabled
+        permanent: yes
+        immediate: yes
+
+    - name: Verificar estado de Nginx
+      shell: systemctl status nginx
+      register: nginx_status
+      changed_when: false
+
+    - name: Mostrar estado de Nginx
+      debug:
+        var: nginx_status.stdout_lines
